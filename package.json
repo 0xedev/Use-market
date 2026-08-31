@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "npx tsc --allowJs --jsx react-jsx --noEmit --noCheck src/main.jsx",
+    "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
