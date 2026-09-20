@@ -1,4 +1,5 @@
-const PIXEL_ID = "7663114510684749844";
+// The browser script requires the pixel code. The Ads API uses the numeric pixel ID.
+const PIXEL_CODE = "D9CDL0RC77U79CKF2L9G";
 
 function ensurePixel() {
   if (window.ttq?.track) return window.ttq;
@@ -40,7 +41,7 @@ function ensurePixel() {
     script.src = source + "?sdkid=" + id + "&lib=ttq";
     document.head.appendChild(script);
   };
-  ttq.load(PIXEL_ID);
+  ttq.load(PIXEL_CODE);
   window.ttq = ttq;
   return ttq;
 }
