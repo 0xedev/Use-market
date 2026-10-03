@@ -320,17 +320,39 @@ export default function Studio() {
       followups: ["due_at", true],
       deliveries: ["created_at", false],
     };
-    const entries = await Promise.all(
-      Object.entries(TABLES).map(async ([k, t]) => {
-        let q = supabase.from(t).select("*").eq("workspace_id", id);
-        if (ordered[k])
-          q = q.order(ordered[k][0], { ascending: ordered[k][1] }).limit(700);
-        const { data: r, error } = await q;
-        if (error) console.error(t, error);
-        return [k, r || []];
-      }),
-    );
-    setData(Object.fromEntries(entries));
+    const loadFollowupLeads = async () => {
+      const pageSize = 500;
+      const leads = [];
+      for (let offset = 0; ; offset += pageSize) {
+        const { data: page, error } = await supabase
+          .from(TABLES.visitors)
+          .select("*")
+          .eq("workspace_id", id)
+          .or("phone.not.is.null,whatsapp.not.is.null")
+          .order("last_seen_at", { ascending: false })
+          .range(offset, offset + pageSize - 1);
+        if (error) {
+          console.error("Could not load CRM leads", error);
+          return leads;
+        }
+        leads.push(...(page || []));
+        if (!page || page.length < pageSize) return leads;
+      }
+    };
+    const [entries, followupLeads] = await Promise.all([
+      Promise.all(
+        Object.entries(TABLES).map(async ([k, t]) => {
+          let q = supabase.from(t).select("*").eq("workspace_id", id);
+          if (ordered[k])
+            q = q.order(ordered[k][0], { ascending: ordered[k][1] }).limit(700);
+          const { data: r, error } = await q;
+          if (error) console.error(t, error);
+          return [k, r || []];
+        }),
+      ),
+      loadFollowupLeads(),
+    ]);
+    setData({ ...Object.fromEntries(entries), followupLeads });
     if (spin) setLoading(false);
   }
   async function insert(table, payload, label = "Saved", reload = true) {
@@ -1015,7 +1037,7 @@ function Pipeline({ orders }) {
 function Leads({ c }) {
   const [stage, setStage] = useState("incomplete");
   const members = (c.team.members || []).filter((member) => member.role !== "viewer");
-  const contactable = c.data.visitors.filter(
+  const contactable = (c.data.followupLeads || c.data.visitors).filter(
     (visitor) =>
       !isInternalTest(visitor) && Boolean(visitor.whatsapp || visitor.phone),
   );
