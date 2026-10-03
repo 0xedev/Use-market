@@ -40,6 +40,7 @@ import {
   Webhook,
   X,
   Phone,
+  SlidersHorizontal,
   CalendarDays,
   Send,
   PackagePlus,
@@ -629,14 +630,16 @@ export default function Studio() {
             </div>
           </div>
           <div className="top-actions">
-            <div className="search">
-              <Search size={16} />
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder={`Search ${page.toLowerCase()}`}
-              />
-            </div>
+            {page !== "Live Visitors" && (
+              <div className="search">
+                <Search size={16} />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={`Search ${page.toLowerCase()}`}
+                />
+              </div>
+            )}
             <button
               className="quick-create"
               onClick={() => setModal({ type: "order" })}
@@ -1105,49 +1108,80 @@ function Leads({ c }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((visitor) => (
-                <tr
-                  key={visitor.id}
-                  onClick={() => c.details("visitor", visitor.id)}
-                >
-                  <td>
-                    <strong>{visitor.name || "Name not captured"}</strong>
-                    <small>{visitor.whatsapp || visitor.phone}</small>
-                  </td>
-                  <td>
-                    {Array.isArray(visitor.fields_touched)
-                      ? new Set(visitor.fields_touched).size
-                      : 0}{" "}
-                    fields
-                    <small>{visitor.status.replaceAll("_", " ")}</small>
-                  </td>
-                  <td>
-                    {visitor.utm_campaign || visitor.utm_source || "Direct"}
-                  </td>
-                  <td onClick={(event) => event.stopPropagation()}>
-                    {canAssign ? (
-                      <select
-                        className="status-select lead-assignee"
-                        value={visitor.assigned_to_user_id || ""}
-                        aria-label={`Assign ${visitor.name || "lead"}`}
-                        onChange={(event) =>
-                          c.assignLead(visitor.id, event.target.value)
-                        }
-                      >
-                        <option value="">Unassigned</option>
-                        {members.map((member) => (
-                          <option key={member.user_id} value={member.user_id}>
-                            {member.full_name || member.email || member.user_id}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span>{memberName(visitor.assigned_to_user_id)}</span>
-                    )}
-                  </td>
-                  <td>{fmtDate(visitor.last_seen_at)}</td>
-                </tr>
-              ))}
+              {rows.map((visitor) => {
+                const phoneHref = phoneCallHref(visitor.phone, visitor.country);
+                const whatsappHref = phoneCallHref(
+                  visitor.whatsapp,
+                  visitor.country,
+                );
+                const showWhatsApp =
+                  visitor.whatsapp &&
+                  (!visitor.phone || whatsappHref !== phoneHref);
+                return (
+                  <tr
+                    key={visitor.id}
+                    onClick={() => c.details("visitor", visitor.id)}
+                  >
+                    <td>
+                      <strong>{visitor.name || "Name not captured"}</strong>
+                      <div className="contact-numbers">
+                        {visitor.phone && (
+                          <span>
+                            <em>Phone</em>
+                            <PhoneLink
+                              value={visitor.phone}
+                              country={visitor.country}
+                              label="Call phone"
+                            />
+                          </span>
+                        )}
+                        {showWhatsApp && (
+                          <span>
+                            <em>WhatsApp</em>
+                            <PhoneLink
+                              value={visitor.whatsapp}
+                              country={visitor.country}
+                              label="Call WhatsApp number"
+                            />
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      {Array.isArray(visitor.fields_touched)
+                        ? new Set(visitor.fields_touched).size
+                        : 0}{" "}
+                      fields
+                      <small>{visitor.status.replaceAll("_", " ")}</small>
+                    </td>
+                    <td>
+                      {visitor.utm_campaign || visitor.utm_source || "Direct"}
+                    </td>
+                    <td onClick={(event) => event.stopPropagation()}>
+                      {canAssign ? (
+                        <select
+                          className="status-select lead-assignee"
+                          value={visitor.assigned_to_user_id || ""}
+                          aria-label={`Assign ${visitor.name || "lead"}`}
+                          onChange={(event) =>
+                            c.assignLead(visitor.id, event.target.value)
+                          }
+                        >
+                          <option value="">Unassigned</option>
+                          {members.map((member) => (
+                            <option key={member.user_id} value={member.user_id}>
+                              {member.full_name || member.email || member.user_id}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span>{memberName(visitor.assigned_to_user_id)}</span>
+                      )}
+                    </td>
+                    <td>{fmtDate(visitor.last_seen_at)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -1166,20 +1200,86 @@ function Leads({ c }) {
   );
 }
 function Visitors({ c }) {
-  const r = filter(c.data.visitors, c.search, [
-    "name",
-    "phone",
-    "email",
-    "source_website",
-    "status",
-    "city",
-    "state",
-  ]),
-    production = r.filter((v) => !isInternalTest(v));
+  const [query, setQuery] = useState(""),
+    [statusFilter, setStatusFilter] = useState("all"),
+    [intentFilter, setIntentFilter] = useState("all"),
+    [contactFilter, setContactFilter] = useState("all"),
+    [websiteFilter, setWebsiteFilter] = useState("all"),
+    [countryFilter, setCountryFilter] = useState("all");
+  const statuses = [
+      ...new Set(
+        c.data.visitors.map((v) => String(v.status || "").trim()).filter(Boolean),
+      ),
+    ].sort(),
+    websites = [
+      ...new Set(c.data.visitors.map((v) => v.source_website).filter(Boolean)),
+    ].sort(),
+    countries = [
+      ...new Set(c.data.visitors.map((v) => v.country).filter(Boolean)),
+    ].sort(),
+    searched = filter(c.data.visitors, query.trim(), [
+      "name",
+      "phone",
+      "whatsapp",
+      "email",
+      "source_website",
+      "status",
+      "city",
+      "state",
+      "country",
+      "utm_source",
+      "utm_campaign",
+    ]),
+    r = searched.filter((v) => {
+      const score = Number(v.intent_score) || 0;
+      if (statusFilter !== "all" && v.status !== statusFilter) return false;
+      if (intentFilter === "hot" && score < 70) return false;
+      if (intentFilter === "warm" && (score < 40 || score >= 70)) return false;
+      if (intentFilter === "low" && score >= 40) return false;
+      if (contactFilter === "phone" && !(v.phone || v.whatsapp)) return false;
+      if (contactFilter === "email" && !v.email) return false;
+      if (
+        contactFilter === "unknown" &&
+        (v.name || v.phone || v.whatsapp || v.email)
+      )
+        return false;
+      if (websiteFilter === "unknown" && v.source_website) return false;
+      if (
+        websiteFilter !== "all" &&
+        websiteFilter !== "unknown" &&
+        v.source_website !== websiteFilter
+      )
+        return false;
+      if (countryFilter === "unknown" && v.country) return false;
+      if (
+        countryFilter !== "all" &&
+        countryFilter !== "unknown" &&
+        v.country !== countryFilter
+      )
+        return false;
+      return true;
+    }),
+    production = r.filter((v) => !isInternalTest(v)),
+    activeFilterCount = [
+      statusFilter !== "all",
+      intentFilter !== "all",
+      contactFilter !== "all",
+      websiteFilter !== "all",
+      countryFilter !== "all",
+    ].filter(Boolean).length,
+    hasActiveFilters = Boolean(query.trim()) || activeFilterCount > 0;
+  const clearFilters = () => {
+    setQuery("");
+    setStatusFilter("all");
+    setIntentFilter("all");
+    setContactFilter("all");
+    setWebsiteFilter("all");
+    setCountryFilter("all");
+  };
   return (
     <>
       <Head
-        title="Live buyer intent"
+        title="Live visitors"
         copy="Click a session to inspect attribution, form progress and lead status. Internal test data is excluded from performance totals."
         right={
           <div className="page-kpis">
@@ -1190,6 +1290,107 @@ function Visitors({ c }) {
           </div>
         }
       />
+      <section className="visitor-filters" aria-label="Filter live visitors">
+        <div className="visitor-filter-top">
+          <div className="visitor-filter-primary">
+            <label className="visitor-search">
+              <span>Search visitors</span>
+              <div>
+                <Search size={15} />
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Name, phone, campaign or location"
+                />
+              </div>
+            </label>
+            <label className="visitor-filter-field">
+              <span>Visitor status</span>
+              <select
+                value={statusFilter}
+                onChange={(event) => setStatusFilter(event.target.value)}
+              >
+                <option value="all">All statuses</option>
+                {statuses.map((status) => (
+                  <option key={status} value={status}>
+                    {status[0].toUpperCase() + status.slice(1).replaceAll("_", " ")}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="visitor-filter-field">
+              <span>Intent score</span>
+              <select
+                value={intentFilter}
+                onChange={(event) => setIntentFilter(event.target.value)}
+              >
+                <option value="all">Any score</option>
+                <option value="hot">High · 70–100</option>
+                <option value="warm">Medium · 40–69</option>
+                <option value="low">Low · 0–39</option>
+              </select>
+            </label>
+          </div>
+          <div className="visitor-filter-count" aria-live="polite">
+            <strong>{r.length}</strong> of {c.data.visitors.length} visitors
+            {hasActiveFilters && (
+              <button type="button" onClick={clearFilters}>
+                Clear filters
+              </button>
+            )}
+          </div>
+        </div>
+        <details className="visitor-filter-more">
+          <summary>
+            <SlidersHorizontal size={14} /> More filters
+            {activeFilterCount > 0 && <b>{activeFilterCount}</b>}
+          </summary>
+          <div className="visitor-filter-advanced">
+            <label className="visitor-filter-field">
+              <span>Contact details</span>
+              <select
+                value={contactFilter}
+                onChange={(event) => setContactFilter(event.target.value)}
+              >
+                <option value="all">Any contact details</option>
+                <option value="phone">Has phone or WhatsApp</option>
+                <option value="email">Has email</option>
+                <option value="unknown">No contact details</option>
+              </select>
+            </label>
+            <label className="visitor-filter-field">
+              <span>Website</span>
+              <select
+                value={websiteFilter}
+                onChange={(event) => setWebsiteFilter(event.target.value)}
+              >
+                <option value="all">All websites</option>
+                <option value="unknown">No website</option>
+                {websites.map((website) => (
+                  <option key={website} value={website}>
+                    {website}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="visitor-filter-field">
+              <span>Country</span>
+              <select
+                value={countryFilter}
+                onChange={(event) => setCountryFilter(event.target.value)}
+              >
+                <option value="all">All countries</option>
+                <option value="unknown">No country recorded</option>
+                {countries.map((country) => (
+                  <option key={country} value={country}>
+                    {country}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </details>
+      </section>
       <Panel noPad>
         <div className="table-wrap">
           <table className="clickable-table">
@@ -1205,42 +1406,80 @@ function Visitors({ c }) {
               </tr>
             </thead>
             <tbody>
-              {r.map((v) => (
-                <tr key={v.id} onClick={() => c.details("visitor", v.id)}>
-                  <td>
-                    <strong>{v.name || "Unknown"}</strong>
-                    <small>
-                      {isInternalTest(v)
-                        ? "Internal test data"
-                        : v.phone || v.email || "Not identified"}
-                    </small>
-                  </td>
-                  <td>
-                    <div className="intent-cell">
-                      <b>{v.intent_score}</b>
-                      <span>
-                        <i style={{ width: `${v.intent_score}%` }} />
-                      </span>
-                    </div>
-                  </td>
-                  <td>
-                    {Array.isArray(v.fields_touched)
-                      ? new Set(v.fields_touched).size
-                      : 0}{" "}
-                    fields
-                    <small>{v.last_event_type?.replaceAll("_", " ")}</small>
-                  </td>
-                  <td>{[v.city, v.state].filter(Boolean).join(", ") || "—"}</td>
-                  <td>{v.source_website}</td>
-                  <td>
-                    <Status v={v.status} />
-                  </td>
-                  <td>{fmtDate(v.last_seen_at)}</td>
-                </tr>
-              ))}
+              {r.map((v) => {
+                const phoneHref = phoneCallHref(v.phone, v.country);
+                const whatsappHref = phoneCallHref(v.whatsapp, v.country);
+                const showWhatsApp =
+                  v.whatsapp && (!v.phone || whatsappHref !== phoneHref);
+                return (
+                  <tr key={v.id} onClick={() => c.details("visitor", v.id)}>
+                    <td>
+                      <strong>{v.name || "Unknown"}</strong>
+                      {isInternalTest(v) ? (
+                        <small>Internal test data</small>
+                      ) : (
+                        <div className="contact-numbers visitor-contact-numbers">
+                          {v.phone && (
+                            <span>
+                              <em>Phone</em>
+                              <PhoneLink value={v.phone} country={v.country} />
+                            </span>
+                          )}
+                          {showWhatsApp && (
+                            <span>
+                              <em>WhatsApp</em>
+                              <PhoneLink
+                                value={v.whatsapp}
+                                country={v.country}
+                                label="Call WhatsApp number"
+                              />
+                            </span>
+                          )}
+                          {!v.phone && !v.whatsapp && (
+                            <small>{v.email || "Not identified"}</small>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <div className="intent-cell">
+                        <b>{v.intent_score}</b>
+                        <span>
+                          <i style={{ width: `${v.intent_score}%` }} />
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      {Array.isArray(v.fields_touched)
+                        ? new Set(v.fields_touched).size
+                        : 0}{" "}
+                      fields
+                      <small>{v.last_event_type?.replaceAll("_", " ")}</small>
+                    </td>
+                    <td>{[v.city, v.state].filter(Boolean).join(", ") || "—"}</td>
+                    <td>{v.source_website}</td>
+                    <td>
+                      <Status v={v.status} />
+                    </td>
+                    <td>{fmtDate(v.last_seen_at)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
+        {!r.length && (
+          <Empty
+            compact
+            label={
+              hasActiveFilters
+                ? "No visitors match these filters"
+                : "No live visitors yet"
+            }
+            action={hasActiveFilters ? "Clear filters" : undefined}
+            onAction={clearFilters}
+          />
+        )}
       </Panel>
     </>
   );
@@ -3984,6 +4223,9 @@ function DrawerBody({ kind, r, c, close }) {
       c.workspace.settings?.lead_followup_message ||
       DEFAULT_LEAD_FOLLOWUP_MESSAGE;
     const phone = normalizeWhatsAppPhone(r.whatsapp || r.phone, r.country);
+    const callHref =
+      phoneCallHref(r.phone, r.country) ||
+      phoneCallHref(r.whatsapp, r.country);
     return (
       <>
         <div className="intent-hero">
@@ -4000,8 +4242,26 @@ function DrawerBody({ kind, r, c, close }) {
           <Details
             x={[
               ["Name", r.name],
-              ["Phone", r.phone],
-              ["WhatsApp", r.whatsapp],
+              r.phone
+                ? [
+                    "Phone",
+                    <PhoneLink
+                      value={r.phone}
+                      country={r.country}
+                      label="Call phone"
+                    />,
+                  ]
+                : ["Phone", null],
+              r.whatsapp
+                ? [
+                    "WhatsApp",
+                    <PhoneLink
+                      value={r.whatsapp}
+                      country={r.country}
+                      label="Call WhatsApp number"
+                    />,
+                  ]
+                : ["WhatsApp", null],
               ["Email", r.email],
               ["Address", r.address],
               [
@@ -4092,8 +4352,8 @@ function DrawerBody({ kind, r, c, close }) {
           />
         </D>
         <div className="drawer-actions">
-          {r.phone && (
-            <a className="outline-btn" href={`tel:${r.phone}`}>
+          {callHref && (
+            <a className="outline-btn" href={callHref}>
               <Phone size={14} /> Call
             </a>
           )}
@@ -4533,7 +4793,7 @@ const Details = ({ x }) => (
       .map(([k, v]) => (
         <div key={k}>
           <dt>{k}</dt>
-          <dd>{String(v)}</dd>
+          <dd>{React.isValidElement(v) ? v : String(v)}</dd>
         </div>
       ))}
   </dl>
@@ -4678,6 +4938,37 @@ const isInternalTest = (row) =>
       row?.attribution?.internal_test ||
       (Array.isArray(row?.tags) && row.tags.includes("internal_test")),
   );
+const phoneCallHref = (value, country) => {
+  const raw = String(value || "").trim();
+  const digits = raw.replace(/\D/g, "");
+  if (!digits) return "";
+  if (raw.startsWith("+")) return `tel:+${digits}`;
+  if (raw.startsWith("00")) return `tel:+${digits.slice(2)}`;
+  if (digits.startsWith("234")) return `tel:+${digits}`;
+  const isNigeria =
+    !country || ["nigeria", "ng"].includes(String(country).trim().toLowerCase());
+  if (isNigeria && digits.startsWith("0")) {
+    return `tel:+234${digits.slice(1)}`;
+  }
+  if (isNigeria && digits.length === 10) return `tel:+234${digits}`;
+  return `tel:${digits}`;
+};
+function PhoneLink({ value, country, label = "Call number" }) {
+  if (!value) return null;
+  const href = phoneCallHref(value, country);
+  return href ? (
+    <a
+      className="phone-link"
+      href={href}
+      aria-label={`${label}: ${value}`}
+      onClick={(event) => event.stopPropagation()}
+    >
+      {value}
+    </a>
+  ) : (
+    <span className="phone-link unavailable">{value}</span>
+  );
+}
 const normalizeWhatsAppPhone = (value, country) => {
   const digits = String(value || "").replace(/\D/g, "");
   if (digits.startsWith("00")) return digits.slice(2);
