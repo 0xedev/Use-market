@@ -83,6 +83,8 @@ const paymentStatuses = [
   "failed",
   "refunded",
 ];
+const DEFAULT_LEAD_FOLLOWUP_MESSAGE =
+  "Hi, this is Ibukun from Caressence. The Mini Stepper is ₦95,000, with free delivery nationwide. I’m here to help you complete your order. Would you like to go ahead?";
 const deliveryStatuses = [
   "pending",
   "scheduled",
@@ -117,6 +119,7 @@ const EMPTY = {
 };
 const NAV = [
   ["Overview", LayoutDashboard],
+  ["Leads", UserPlus],
   ["Live Visitors", Flame],
   ["Orders", ShoppingBag],
   ["Customers", Users],
@@ -185,6 +188,7 @@ export default function Studio() {
     [mobile, setMobile] = useState(false),
     [modal, setModal] = useState(null),
     [drawer, setDrawer] = useState(null),
+    [team, setTeam] = useState({ members: [], invites: [] }),
     [toast, setToast] = useState(null);
   const timer = useRef(null);
   useEffect(() => {
@@ -239,17 +243,46 @@ export default function Studio() {
   };
   async function bootstrap() {
     setLoading(true);
-    const { data: m, error } = await supabase
-      .from("crm_workspace_members")
-      .select("workspace_id,role")
-      .eq("user_id", session.user.id)
-      .limit(1)
-      .maybeSingle();
+    let invitedWorkspaceId = null;
+    const inviteToken = new URLSearchParams(window.location.search).get(
+      "workspace_invite",
+    );
+    if (inviteToken) {
+      const { data: acceptedWorkspaceId, error: inviteError } =
+        await supabase.rpc("crm_accept_workspace_invite", {
+          p_token: inviteToken,
+        });
+      if (inviteError) notify(inviteError.message, "error");
+      else invitedWorkspaceId = acceptedWorkspaceId;
+      const url = new URL(window.location.href);
+      url.searchParams.delete("workspace_invite");
+      window.history.replaceState({}, document.title, url.toString());
+      if (invitedWorkspaceId)
+        localStorage.setItem("crm_active_workspace_id", invitedWorkspaceId);
+    }
+
+    const preferredWorkspaceId =
+      invitedWorkspaceId || localStorage.getItem("crm_active_workspace_id");
+    const membershipQuery = (workspaceId) => {
+      let query = supabase
+        .from("crm_workspace_members")
+        .select("workspace_id,role")
+        .eq("user_id", session.user.id)
+        .limit(1);
+      if (workspaceId) query = query.eq("workspace_id", workspaceId);
+      return query.maybeSingle();
+    };
+    let { data: m, error } = await membershipQuery(preferredWorkspaceId);
+    if (!m && !invitedWorkspaceId && preferredWorkspaceId) {
+      localStorage.removeItem("crm_active_workspace_id");
+      ({ data: m, error } = await membershipQuery(null));
+    }
     if (error || !m) {
       notify(error?.message || "No CRM workspace attached", "error");
       setLoading(false);
       return;
     }
+    localStorage.setItem("crm_active_workspace_id", m.workspace_id);
     const { data: w, error: we } = await supabase
       .from("crm_workspaces")
       .select("*")
@@ -262,8 +295,20 @@ export default function Studio() {
     }
     setWorkspace(w);
     setRole(m.role);
-    await loadAll(m.workspace_id, false);
+    await Promise.all([loadAll(m.workspace_id, false), loadTeam(m.workspace_id)]);
     setLoading(false);
+  }
+  async function loadTeam(id = workspace?.id) {
+    if (!id) return;
+    const { data: result, error } = await supabase.rpc("crm_workspace_team", {
+      p_workspace_id: id,
+    });
+    if (error) {
+      console.error("Could not load CRM team", error);
+      setTeam({ members: [], invites: [] });
+      return;
+    }
+    setTeam(result || { members: [], invites: [] });
   }
   async function loadAll(id = workspace?.id, spin = true) {
     if (!id) return;
@@ -356,6 +401,50 @@ export default function Studio() {
     if (successMessage) notify(successMessage);
     return result;
   }
+  async function assignLead(visitorId, assigneeId) {
+    const result = await crmAction(
+      "crm_assign_visitor",
+      { p_visitor_id: visitorId, p_assignee_id: assigneeId || null },
+      "Lead assignment saved",
+    );
+    return result;
+  }
+  async function inviteMember(email, inviteRole) {
+    const { data: result, error } = await supabase.functions.invoke(
+      "invite-workspace-member",
+      { body: { workspace_id: workspace.id, email, role: inviteRole } },
+    );
+    if (error) {
+      let message = error.message || "Could not send the invite";
+      try {
+        const response = await error.context?.json();
+        message = response?.error || message;
+      } catch {
+        // Keep the Supabase error message when there is no JSON response.
+      }
+      notify(message, "error");
+      return null;
+    }
+    await loadTeam(workspace.id);
+    notify(result.email_notice || "Team invite saved");
+    return result;
+  }
+  async function saveLeadMessage(message) {
+    const { error } = await supabase.rpc("crm_save_lead_followup_message", {
+      p_workspace_id: workspace.id,
+      p_message: message,
+    });
+    if (error) {
+      notify(error.message, "error");
+      return false;
+    }
+    setWorkspace((current) => ({
+      ...current,
+      settings: { ...(current.settings || {}), lead_followup_message: message },
+    }));
+    notify("WhatsApp follow-up message saved");
+    return true;
+  }
   async function markLeadContacted(visitorId) {
     return crmAction(
       "crm_mark_lead_contacted",
@@ -423,6 +512,10 @@ export default function Studio() {
     saveWorkspace,
     markLeadContacted,
     convertLead,
+    team,
+    assignLead,
+    inviteMember,
+    saveLeadMessage,
     markOrderPaid,
     markOrderDelivered,
     refresh: () => loadAll(),
@@ -460,6 +553,18 @@ export default function Studio() {
                   {
                     data.visitors.filter(
                       (v) => v.intent_score >= 70 && v.status !== "submitted",
+                    ).length
+                  }
+                </b>
+              )}
+              {n === "Leads" && (
+                <b className="nav-count">
+                  {
+                    data.visitors.filter(
+                      (v) =>
+                        !isInternalTest(v) &&
+                        v.status !== "submitted" &&
+                        Boolean(v.whatsapp || v.phone),
                     ).length
                   }
                 </b>
@@ -567,7 +672,7 @@ function Login({ notify }) {
     setBusy(true);
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: window.location.origin },
+      options: { emailRedirectTo: window.location.href },
     });
     notify(
       error ? error.message : "Check your email for the sign-in link.",
@@ -665,6 +770,7 @@ const Loading = () => (
 function Page({ page, ctx }) {
   const m = {
     Overview: <Overview c={ctx} />,
+    Leads: <Leads c={ctx} />,
     "Live Visitors": <Visitors c={ctx} />,
     Orders: <Orders c={ctx} />,
     Customers: <Customers c={ctx} />,
@@ -685,6 +791,18 @@ function Overview({ c }) {
   const { data, open, details } = c,
     productionVisitors = data.visitors.filter((v) => !isInternalTest(v)),
     productionOrders = data.orders.filter((o) => !isInternalTest(o)),
+    leadOrders = productionOrders.filter((o) =>
+      isProductionLeadOrder(o, data.visitors),
+    ),
+    activeLeadOrders = leadOrders.filter(
+      (o) => !["cancelled", "returned", "failed"].includes(o.status),
+    ),
+    paidLeadOrders = activeLeadOrders.filter((o) => o.payment_status === "paid"),
+    leadRevenue = paidLeadOrders.reduce((sum, o) => sum + Number(o.total || 0), 0),
+    leadOrderValue = activeLeadOrders.reduce(
+      (sum, o) => sum + Number(o.total || 0),
+      0,
+    ),
     hot = productionVisitors.filter(
       (v) => v.intent_score >= 70 && v.status !== "submitted",
     ),
@@ -734,6 +852,18 @@ function Overview({ c }) {
             ).length
           }
           s={`${productionOrders.length} total`}
+        />
+        <Metric
+          I={CircleDollarSign}
+          t="Paid lead revenue"
+          v={money(leadRevenue)}
+          s={`${paidLeadOrders.length} paid lead orders`}
+        />
+        <Metric
+          I={ShoppingBag}
+          t="Lead order value"
+          v={money(leadOrderValue)}
+          s={`${activeLeadOrders.length} active lead orders · paid and unpaid`}
         />
         <Metric
           I={CircleDollarSign}
@@ -882,6 +1012,137 @@ function Pipeline({ orders }) {
   );
 }
 
+function Leads({ c }) {
+  const [stage, setStage] = useState("incomplete");
+  const members = (c.team.members || []).filter((member) => member.role !== "viewer");
+  const contactable = c.data.visitors.filter(
+    (visitor) =>
+      !isInternalTest(visitor) && Boolean(visitor.whatsapp || visitor.phone),
+  );
+  const searched = filter(contactable, c.search, [
+    "name",
+    "phone",
+    "whatsapp",
+    "source_website",
+    "status",
+    "city",
+    "state",
+  ]);
+  const rows = searched.filter((visitor) =>
+    stage === "incomplete"
+      ? visitor.status !== "submitted"
+      : visitor.status === "submitted",
+  );
+  const incompleteCount = contactable.filter(
+    (visitor) => visitor.status !== "submitted",
+  ).length;
+  const submittedCount = contactable.length - incompleteCount;
+  const canAssign = ["owner", "admin", "manager"].includes(c.role);
+  const memberName = (id) => {
+    const member = members.find((item) => item.user_id === id);
+    return member?.full_name || member?.email || "Unassigned";
+  };
+  return (
+    <>
+      <Head
+        title="Leads to follow up"
+        copy="These visitors left a phone or WhatsApp number. Incomplete leads did not submit the full form. They are not counted as buyers."
+        right={
+          <div className="page-kpis">
+            <b>{incompleteCount}</b>
+            <span>incomplete</span>
+            <b>{submittedCount}</b>
+            <span>submitted</span>
+          </div>
+        }
+      />
+      <div className="lead-tabs" role="tablist" aria-label="Lead status">
+        <button
+          className={stage === "incomplete" ? "active" : ""}
+          onClick={() => setStage("incomplete")}
+        >
+          Incomplete forms <b>{incompleteCount}</b>
+        </button>
+        <button
+          className={stage === "submitted" ? "active" : ""}
+          onClick={() => setStage("submitted")}
+        >
+          Submitted <b>{submittedCount}</b>
+        </button>
+      </div>
+      <Panel noPad>
+        <div className="table-wrap">
+          <table className="clickable-table">
+            <thead>
+              <tr>
+                <th>Contact</th>
+                <th>Form progress</th>
+                <th>Source</th>
+                <th>Assigned to</th>
+                <th>Last seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((visitor) => (
+                <tr
+                  key={visitor.id}
+                  onClick={() => c.details("visitor", visitor.id)}
+                >
+                  <td>
+                    <strong>{visitor.name || "Name not captured"}</strong>
+                    <small>{visitor.whatsapp || visitor.phone}</small>
+                  </td>
+                  <td>
+                    {Array.isArray(visitor.fields_touched)
+                      ? new Set(visitor.fields_touched).size
+                      : 0}{" "}
+                    fields
+                    <small>{visitor.status.replaceAll("_", " ")}</small>
+                  </td>
+                  <td>
+                    {visitor.utm_campaign || visitor.utm_source || "Direct"}
+                  </td>
+                  <td onClick={(event) => event.stopPropagation()}>
+                    {canAssign ? (
+                      <select
+                        className="status-select lead-assignee"
+                        value={visitor.assigned_to_user_id || ""}
+                        aria-label={`Assign ${visitor.name || "lead"}`}
+                        onChange={(event) =>
+                          c.assignLead(visitor.id, event.target.value)
+                        }
+                      >
+                        <option value="">Unassigned</option>
+                        {members.map((member) => (
+                          <option key={member.user_id} value={member.user_id}>
+                            {member.full_name || member.email || member.user_id}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span>{memberName(visitor.assigned_to_user_id)}</span>
+                    )}
+                  </td>
+                  <td>{fmtDate(visitor.last_seen_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!rows.length && (
+          <Empty
+            compact
+            label={
+              stage === "incomplete"
+                ? "No incomplete forms with a contact number"
+                : "No submitted WhatsApp leads"
+            }
+          />
+        )}
+      </Panel>
+    </>
+  );
+}
 function Visitors({ c }) {
   const r = filter(c.data.visitors, c.search, [
     "name",
@@ -1697,6 +1958,18 @@ function Analytics({ c }) {
     ).length,
     submitted = d.visitors.filter((v) => v.status === "submitted").length,
     del = d.orders.filter((o) => o.status === "delivered").length,
+    leadOrders = d.orders.filter((o) =>
+      isProductionLeadOrder(o, d.visitors),
+    ),
+    activeLeadOrders = leadOrders.filter(
+      (o) => !["cancelled", "returned", "failed"].includes(o.status),
+    ),
+    paidLeadOrders = activeLeadOrders.filter((o) => o.payment_status === "paid"),
+    leadRevenue = paidLeadOrders.reduce((sum, o) => sum + Number(o.total || 0), 0),
+    leadValue = activeLeadOrders.reduce(
+      (sum, o) => sum + Number(o.total || 0),
+      0,
+    ),
     rev = d.orders
       .filter((o) => o.status === "delivered")
       .reduce((s, o) => s + Number(o.total || 0), 0),
@@ -1774,6 +2047,18 @@ function Analytics({ c }) {
           t="Delivery rate"
           v={rate(del, d.orders.length)}
           s="orders → delivered"
+        />
+        <Metric
+          I={CircleDollarSign}
+          t="Paid lead revenue"
+          v={money(leadRevenue)}
+          s={`${paidLeadOrders.length} paid lead orders`}
+        />
+        <Metric
+          I={ShoppingBag}
+          t="Lead order value"
+          v={money(leadValue)}
+          s={`${activeLeadOrders.length} active orders · paid and unpaid`}
         />
         <Metric
           I={CircleDollarSign}
@@ -1970,7 +2255,166 @@ function SettingsPage({ c }) {
           </dl>
         </Panel>
       </div>
+      <div className="settings-operations">
+        <TeamSettings c={c} />
+        <LeadMessageSettings c={c} />
+      </div>
     </>
+  );
+}
+
+function TeamSettings({ c }) {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("agent");
+  const [busy, setBusy] = useState(false);
+  const [inviteUrl, setInviteUrl] = useState("");
+  const [inviteNotice, setInviteNotice] = useState("");
+  const canInvite = ["owner", "admin"].includes(c.role);
+  const submit = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    const result = await c.inviteMember(email, role);
+    setBusy(false);
+    if (!result) return;
+    setEmail("");
+    setInviteUrl(result.invite_url || "");
+    setInviteNotice(result.email_notice || "Invite saved.");
+  };
+  const copyInvite = async () => {
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      c.notify("Invite link copied");
+    } catch {
+      c.notify("Could not copy the link. Select and copy it instead.", "error");
+    }
+  };
+  const invites = c.team.invites || [];
+  return (
+    <Panel title="Team members">
+      <p className="muted">
+        Invite people to this CRM workspace. Assign incomplete leads to a sales
+        team member from the Leads page.
+      </p>
+      {canInvite ? (
+        <form className="team-invite-form" onSubmit={submit}>
+          <label>
+            Email address
+            <input
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="teammate@example.com"
+              required
+            />
+          </label>
+          <label>
+            Role
+            <select value={role} onChange={(event) => setRole(event.target.value)}>
+              <option value="agent">Agent — follow up leads</option>
+              <option value="manager">Manager — assign leads</option>
+              {c.role === "owner" && <option value="admin">Admin — manage team</option>}
+              <option value="viewer">Viewer — view only</option>
+            </select>
+          </label>
+          <button className="primary-btn" disabled={busy}>
+            {busy ? <Loader2 className="spin" size={15} /> : <UserPlus size={15} />}
+            Invite by email
+          </button>
+        </form>
+      ) : (
+        <p className="muted">Only the workspace owner or an admin can send invites.</p>
+      )}
+      {inviteNotice && (
+        <div className="invite-notice">
+          <span>{inviteNotice}</span>
+          {inviteUrl && (
+            <>
+              <input aria-label="Invite link" readOnly value={inviteUrl} />
+              <button className="outline-btn" onClick={copyInvite}>
+                <Copy size={14} /> Copy link
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      <div className="team-list">
+        {(c.team.members || []).map((member) => (
+          <div className="team-row" key={member.user_id}>
+            <div className="team-avatar">
+              {(member.full_name || member.email || "?")[0].toUpperCase()}
+            </div>
+            <div>
+              <strong>
+                {member.full_name || member.email || "Team member"}
+                {member.user_id === c.session.user.id ? " · You" : ""}
+              </strong>
+              <span>{member.email}</span>
+            </div>
+            <Status v={member.role} />
+          </div>
+        ))}
+      </div>
+      {canInvite && invites.length > 0 && (
+        <div className="pending-invites">
+          <strong>Pending invites</strong>
+          {invites.map((invite) => (
+            <div className="team-row" key={invite.id}>
+              <div className="team-avatar"><Mail size={15} /></div>
+              <div>
+                <strong>{invite.email}</strong>
+                <span>
+                  {invite.role} · expires {fmtDate(invite.expires_at)}
+                </span>
+              </div>
+              <Status
+                v={new Date(invite.expires_at) < new Date() ? "expired" : "pending"}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function LeadMessageSettings({ c }) {
+  const [message, setMessage] = useState(
+    c.workspace.settings?.lead_followup_message || DEFAULT_LEAD_FOLLOWUP_MESSAGE,
+  );
+  const [busy, setBusy] = useState(false);
+  const canEdit = ["owner", "admin", "manager"].includes(c.role);
+  useEffect(() => {
+    setMessage(
+      c.workspace.settings?.lead_followup_message ||
+        DEFAULT_LEAD_FOLLOWUP_MESSAGE,
+    );
+  }, [c.workspace.id, c.workspace.settings?.lead_followup_message]);
+  const save = async () => {
+    setBusy(true);
+    await c.saveLeadMessage(message);
+    setBusy(false);
+  };
+  return (
+    <Panel title="WhatsApp follow-up message">
+      <p className="muted">
+        This text appears on incomplete lead records. The CRM opens WhatsApp with
+        the text ready. It does not send the message for you.
+      </p>
+      <textarea
+        className="lead-message-editor"
+        value={message}
+        onChange={(event) => setMessage(event.target.value)}
+        maxLength={1200}
+        readOnly={!canEdit}
+        aria-label="WhatsApp follow-up message"
+      />
+      {canEdit && (
+        <button className="primary-btn" onClick={save} disabled={busy}>
+          {busy ? <Loader2 className="spin" size={15} /> : <Save size={15} />}
+          Save message
+        </button>
+      )}
+    </Panel>
   );
 }
 
@@ -3509,7 +3953,15 @@ const drawerTitle = (k, r) =>
                 ? "Delivery"
                 : "Details";
 function DrawerBody({ kind, r, c, close }) {
-  if (kind === "visitor")
+  if (kind === "visitor") {
+    const assignedMember = (c.team.members || []).find(
+      (member) => member.user_id === r.assigned_to_user_id,
+    );
+    const canAssign = ["owner", "admin", "manager"].includes(c.role);
+    const message =
+      c.workspace.settings?.lead_followup_message ||
+      DEFAULT_LEAD_FOLLOWUP_MESSAGE;
+    const phone = normalizeWhatsAppPhone(r.whatsapp || r.phone, r.country);
     return (
       <>
         <div className="intent-hero">
@@ -3536,6 +3988,57 @@ function DrawerBody({ kind, r, c, close }) {
               ],
             ]}
           />
+        </D>
+        <D title="Follow-up owner">
+          {canAssign ? (
+            <select
+              className="status-select lead-assignee full-width"
+              value={r.assigned_to_user_id || ""}
+              aria-label="Assign lead to a team member"
+              onChange={(event) => c.assignLead(r.id, event.target.value)}
+            >
+              <option value="">Unassigned</option>
+              {(c.team.members || [])
+                .filter((member) => member.role !== "viewer")
+                .map((member) => (
+                  <option key={member.user_id} value={member.user_id}>
+                    {member.full_name || member.email || member.user_id}
+                  </option>
+                ))}
+            </select>
+          ) : (
+            <p className="muted">
+              {assignedMember?.full_name || assignedMember?.email || "Unassigned"}
+            </p>
+          )}
+        </D>
+        <D title="WhatsApp follow-up">
+          <div className="lead-message-preview">{message}</div>
+          <div className="lead-message-actions">
+            {phone.length >= 8 && phone.length <= 15 && (
+              <a
+                className="outline-btn"
+                target="_blank"
+                rel="noreferrer"
+                href={`https://wa.me/${phone}?text=${encodeURIComponent(message)}`}
+              >
+                <MessageCircle size={14} /> Open WhatsApp
+              </a>
+            )}
+            <button
+              className="outline-btn"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(message);
+                  c.notify("Follow-up message copied");
+                } catch {
+                  c.notify("Could not copy the message", "error");
+                }
+              }}
+            >
+              <Copy size={14} /> Copy message
+            </button>
+          </div>
         </D>
         <D title="Captured form data">
           <div className="answer-list">
@@ -3572,12 +4075,12 @@ function DrawerBody({ kind, r, c, close }) {
               <Phone size={14} /> Call
             </a>
           )}
-          {(r.whatsapp || r.phone) && (
+          {phone.length >= 8 && phone.length <= 15 && (
             <a
               className="outline-btn"
               target="_blank"
               rel="noreferrer"
-              href={`https://wa.me/${String(r.whatsapp || r.phone).replace(/\D/g, "")}`}
+              href={`https://wa.me/${phone}?text=${encodeURIComponent(message)}`}
             >
               <MessageCircle size={14} /> WhatsApp
             </a>
@@ -3611,6 +4114,7 @@ function DrawerBody({ kind, r, c, close }) {
         </div>
       </>
     );
+  }
   if (kind === "customer") {
     const orders = c.data.orders.filter((o) => o.buyer_id === r.id),
       fu = c.data.followups.filter((f) => f.buyer_id === r.id);
@@ -4152,6 +4656,20 @@ const isInternalTest = (row) =>
       row?.attribution?.internal_test ||
       (Array.isArray(row?.tags) && row.tags.includes("internal_test")),
   );
+const normalizeWhatsAppPhone = (value, country) => {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.startsWith("00")) return digits.slice(2);
+  if (digits.startsWith("0") && digits.length >= 10) {
+    const isNigeria = !country || ["nigeria", "ng"].includes(String(country).toLowerCase());
+    return isNigeria ? `234${digits.slice(1)}` : "";
+  }
+  return digits;
+};
+const isProductionLeadOrder = (order, visitors) => {
+  if (!order?.lead_visitor_id || isInternalTest(order)) return false;
+  const visitor = visitors.find((item) => item.id === order.lead_visitor_id);
+  return !isInternalTest(visitor);
+};
 
 function PublicOrderForm({ slug }) {
   const params = new URLSearchParams(window.location.search),
